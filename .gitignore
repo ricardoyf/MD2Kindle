@@ -1,0 +1,12 @@
+.gradle/
+.idea/
+local.properties
+**/build/
+*.iml
+*.jks
+*.keystore
+*.zip
+*.apk
+*.apk.sha256
+!MD2Kindle-v*.apk
+!MD2Kindle-v*.apk.sha256
