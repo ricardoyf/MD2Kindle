@@ -50,10 +50,14 @@ data class EpubResult(
 class EpubGenerator {
     private val extensions = listOf(TablesExtension.create())
     private val parser = Parser.builder().extensions(extensions).build()
+    private val chapterDetector = ChapterDetector()
     private val renderer = HtmlRenderer.builder()
         .extensions(extensions)
         .escapeHtml(true)
         .build()
+
+    fun detectTableOfContents(markdown: String, fallbackTitle: String): List<TocPreviewEntry> =
+        chapterDetector.previews(markdown, fallbackTitle)
 
     fun write(book: EpubBook, output: OutputStream): EpubResult {
         require(book.markdown.isNotBlank()) { "El documento Markdown está vacío." }
@@ -65,11 +69,17 @@ class EpubGenerator {
             .removePrefix("\uFEFF")
 
         val warnings = mutableListOf<String>()
-        val chapters = splitIntoChapters(normalizedMarkdown, book.metadata.title)
-        val parsedChapters = chapters.map { chapter ->
-            ParsedChapter(chapter.title, parser.parse(chapter.markdown))
+        val structure = chapterDetector.detectBook(normalizedMarkdown, book.metadata.title)
+        val parsedFrontMatter = structure.frontMatterMarkdown?.let(parser::parse)
+        val parsedChapters = structure.chapters.map { chapter ->
+            ParsedChapter(chapter, parser.parse(chapter.markdown))
         }
-        val imageBindings = resolveResources(parsedChapters, book.images, warnings)
+        val imageBindings = resolveResources(
+            frontMatter = parsedFrontMatter,
+            chapters = parsedChapters,
+            images = book.images,
+            warnings = warnings,
+        )
 
         ZipOutputStream(output.buffered()).use { zip ->
             writeMimetype(zip)
@@ -86,7 +96,20 @@ class EpubGenerator {
             }
 
             imageBindings.forEach { binding ->
-                    writeBytes(zip, "EPUB/${binding.targetName}", binding.asset.bytes)
+                writeBytes(zip, "EPUB/${binding.targetName}", binding.asset.bytes)
+            }
+
+            parsedFrontMatter?.let { document ->
+                writeText(
+                    zip,
+                    "EPUB/frontmatter.xhtml",
+                    chapterXhtml(
+                        title = book.metadata.title,
+                        body = renderer.render(document),
+                        language = safeLanguage(book.metadata.language),
+                        anchorId = "portada-interior",
+                    ),
+                )
             }
 
             parsedChapters.forEachIndexed { index, chapter ->
@@ -94,33 +117,40 @@ class EpubGenerator {
                     zip,
                     "EPUB/chapter_${index + 1}.xhtml",
                     chapterXhtml(
-                        title = chapter.title,
+                        title = chapter.detected.title,
                         body = renderer.render(chapter.document),
                         language = safeLanguage(book.metadata.language),
+                        anchorId = chapter.detected.anchorId,
                     ),
                 )
             }
 
             writeText(
                 zip,
-                "EPUB/nav.xhtml",
-                navigationXhtml(book.metadata, chapters, book.cover != null),
+                "EPUB/contents.xhtml",
+                visibleContentsXhtml(book.metadata, structure.chapters),
             )
-            writeText(zip, "EPUB/toc.ncx", tocNcx(book.metadata, chapters))
+            writeText(
+                zip,
+                "EPUB/nav.xhtml",
+                navigationXhtml(book.metadata, structure.chapters, book.cover != null),
+            )
+            writeText(zip, "EPUB/toc.ncx", tocNcx(book.metadata, structure.chapters))
             writeText(
                 zip,
                 "EPUB/package.opf",
                 packageOpf(
                     metadata = book.metadata,
-                    chapters = chapters,
+                    chapters = structure.chapters,
                     imageBindings = imageBindings,
                     cover = book.cover,
+                    hasFrontMatter = parsedFrontMatter != null,
                 ),
             )
         }
 
         return EpubResult(
-            chapterCount = chapters.size,
+            chapterCount = structure.chapters.size,
             embeddedImageCount = imageBindings.size +
                 if (book.cover != null) 1 else 0,
             warnings = warnings.distinct(),
@@ -128,6 +158,7 @@ class EpubGenerator {
     }
 
     private fun resolveResources(
+        frontMatter: Node?,
         chapters: List<ParsedChapter>,
         images: List<EpubAsset>,
         warnings: MutableList<String>,
@@ -140,8 +171,19 @@ class EpubGenerator {
         }
 
         val usedAssets = mutableMapOf<String, ImageBinding>()
-        chapters.forEach { chapter ->
-            chapter.document.accept(object : AbstractVisitor() {
+        val aliases = buildMap<String, String> {
+            chapters.forEachIndexed { index, chapter ->
+                val target = "chapter_${index + 1}.xhtml#${chapter.detected.anchorId}"
+                chapter.detected.anchorAliases.forEach { alias -> putIfAbsent(alias, target) }
+                putIfAbsent(chapter.detected.anchorId, target)
+            }
+        }
+        val documents = buildList {
+            frontMatter?.let(::add)
+            addAll(chapters.map { it.document })
+        }
+        documents.forEach { document ->
+            document.accept(object : AbstractVisitor() {
                 override fun visit(image: Image) {
                     val rawTarget = image.destination.trim()
                     val alt = nodeText(image).ifBlank { "Imagen" }
@@ -175,7 +217,19 @@ class EpubGenerator {
 
                 override fun visit(link: Link) {
                     val target = link.destination.trim()
-                    if (target.isUnpackagedLocalLink()) {
+                    if (target.startsWith("#")) {
+                        val alias = chapterDetector.slug(
+                            decodePercentEncoding(target.removePrefix("#")),
+                        )
+                        val destination = aliases[alias]
+                        if (destination == null) {
+                            warnings += "Destino interno no encontrado: $target"
+                            replaceWithText(link, nodeText(link))
+                        } else {
+                            link.destination = destination
+                            visitChildren(link)
+                        }
+                    } else if (target.isUnpackagedLocalLink()) {
                         warnings += "Enlace local omitido: $target"
                         replaceWithText(link, nodeText(link))
                     } else {
@@ -187,42 +241,12 @@ class EpubGenerator {
         return usedAssets.values.toList()
     }
 
-    private fun splitIntoChapters(markdown: String, fallbackTitle: String): List<Chapter> {
-        val lines = markdown.lines()
-        val headingIndexes = lines.mapIndexedNotNull { index, line ->
-            H1_PATTERN.matchEntire(line.trim())?.let { index }
-        }
-        if (headingIndexes.isEmpty()) {
-            return listOf(Chapter(fallbackTitle, markdown.trim()))
-        }
-
-        val chapters = mutableListOf<Chapter>()
-        val prefix = lines.subList(0, headingIndexes.first()).joinToString("\n").trim()
-        if (prefix.isNotBlank()) {
-            chapters += Chapter("Introducción", prefix)
-        }
-
-        headingIndexes.forEachIndexed { position, start ->
-            val end = headingIndexes.getOrNull(position + 1) ?: lines.size
-            val heading = H1_PATTERN.matchEntire(lines[start].trim())
-                ?.groupValues
-                ?.get(1)
-                ?.let(::plainHeading)
-                ?.ifBlank { null }
-                ?: "Capítulo ${position + 1}"
-            chapters += Chapter(
-                title = heading,
-                markdown = lines.subList(start, end).joinToString("\n").trim(),
-            )
-        }
-        return chapters.ifEmpty { listOf(Chapter(fallbackTitle, markdown.trim())) }
-    }
-
     private fun packageOpf(
         metadata: EpubMetadata,
-        chapters: List<Chapter>,
+        chapters: List<DetectedChapter>,
         imageBindings: List<ImageBinding>,
         cover: EpubAsset?,
+        hasFrontMatter: Boolean,
     ): String {
         val modified = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
@@ -241,7 +265,17 @@ class EpubGenerator {
         val chapterManifest = chapters.indices.joinToString("\n") { index ->
             """<item id="chapter-${index + 1}" href="chapter_${index + 1}.xhtml" media-type="application/xhtml+xml"/>"""
         }
+        val frontMatterManifest = if (hasFrontMatter) {
+            """<item id="frontmatter" href="frontmatter.xhtml" media-type="application/xhtml+xml"/>"""
+        } else {
+            ""
+        }
         val coverSpine = if (cover == null) "" else """<itemref idref="cover-page" linear="no"/>"""
+        val frontMatterSpine = if (hasFrontMatter) {
+            """<itemref idref="frontmatter"/>"""
+        } else {
+            ""
+        }
         val chapterSpine = chapters.indices.joinToString("\n") { index ->
             """<itemref idref="chapter-${index + 1}"/>"""
         }
@@ -265,12 +299,16 @@ class EpubGenerator {
                 <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
                 <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
                 <item id="styles" href="styles.css" media-type="text/css"/>
+                <item id="contents" href="contents.xhtml" media-type="application/xhtml+xml"/>
                 $coverManifest
+                $frontMatterManifest
                 $imageManifest
                 $chapterManifest
               </manifest>
               <spine toc="ncx">
                 $coverSpine
+                $frontMatterSpine
+                <itemref idref="contents"/>
                 $chapterSpine
               </spine>
             </package>
@@ -280,24 +318,13 @@ class EpubGenerator {
 
     private fun navigationXhtml(
         metadata: EpubMetadata,
-        chapters: List<Chapter>,
+        chapters: List<DetectedChapter>,
         hasCover: Boolean,
     ): String {
-        val items = chapters.mapIndexed { index, chapter ->
-            """<li><a href="chapter_${index + 1}.xhtml">${xml(chapter.title)}</a></li>"""
-        }.joinToString("\n")
-        val landmarks = if (hasCover) {
-            """
-            <nav epub:type="landmarks" hidden="hidden">
-              <h2>Guía</h2>
-              <ol>
-                <li><a epub:type="cover" href="cover.xhtml">Portada</a></li>
-              </ol>
-            </nav>
-            """.trimIndent()
-        } else {
-            ""
-        }
+        val items = navigationList(chapters)
+        val coverLandmark = if (hasCover) {
+            """<li><a epub:type="cover" href="cover.xhtml">Portada</a></li>"""
+        } else ""
         return xhtmlDocument(
             title = "Índice",
             language = safeLanguage(metadata.language),
@@ -308,27 +335,75 @@ class EpubGenerator {
                     $items
                   </ol>
                 </nav>
-                $landmarks
+                <nav epub:type="landmarks" hidden="hidden">
+                  <h2>Guía</h2>
+                  <ol>
+                    $coverLandmark
+                    <li><a epub:type="toc" href="contents.xhtml">Índice</a></li>
+                    <li><a epub:type="bodymatter" href="chapter_1.xhtml#${xml(chapters.first().anchorId)}">Comienzo</a></li>
+                  </ol>
+                </nav>
             """.trimIndent(),
             extraNamespace = """ xmlns:epub="http://www.idpf.org/2007/ops"""",
         )
     }
 
-    private fun tocNcx(metadata: EpubMetadata, chapters: List<Chapter>): String {
-        val navPoints = chapters.mapIndexed { index, chapter ->
-            """
-            <navPoint id="navPoint-${index + 1}" playOrder="${index + 1}">
-              <navLabel><text>${xml(chapter.title)}</text></navLabel>
-              <content src="chapter_${index + 1}.xhtml"/>
-            </navPoint>
+    private fun visibleContentsXhtml(
+        metadata: EpubMetadata,
+        chapters: List<DetectedChapter>,
+    ): String = xhtmlDocument(
+        title = "Índice",
+        language = safeLanguage(metadata.language),
+        body = """
+            <nav epub:type="toc" id="visible-toc">
+              <h1>Índice</h1>
+              <ol>
+                ${navigationList(chapters)}
+              </ol>
+            </nav>
+        """.trimIndent(),
+        extraNamespace = """ xmlns:epub="http://www.idpf.org/2007/ops"""",
+    )
+
+    private fun navigationList(chapters: List<DetectedChapter>): String {
+        val roots = tocRoots(chapters)
+        return roots.joinToString("\n") { root ->
+            val children = if (root.children.isEmpty()) {
+                ""
+            } else {
+                root.children.joinToString(
+                    prefix = "\n<ol>\n",
+                    postfix = "\n</ol>",
+                    separator = "\n",
+                ) { child ->
+                    """<li><a href="${xml(child.href)}">${xml(child.title)}</a></li>"""
+                }
+            }
+            """<li><a href="${xml(root.href)}">${xml(root.title)}</a>$children</li>"""
+        }
+    }
+
+    private fun tocNcx(metadata: EpubMetadata, chapters: List<DetectedChapter>): String {
+        var playOrder = 0
+        fun navPoint(item: TocItem): String {
+            playOrder += 1
+            val currentOrder = playOrder
+            val children = item.children.joinToString("\n") { navPoint(it) }
+            return """
+                <navPoint id="navPoint-$currentOrder" playOrder="$currentOrder">
+                  <navLabel><text>${xml(item.title)}</text></navLabel>
+                  <content src="${xml(item.href)}"/>
+                  $children
+                </navPoint>
             """.trimIndent()
-        }.joinToString("\n")
+        }
+        val navPoints = tocRoots(chapters).joinToString("\n") { navPoint(it) }
         return xmlDocument(
             """
             <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
               <head>
                 <meta name="dtb:uid" content="${xml(metadata.identifier)}"/>
-                <meta name="dtb:depth" content="1"/>
+                <meta name="dtb:depth" content="2"/>
                 <meta name="dtb:totalPageCount" content="0"/>
                 <meta name="dtb:maxPageNumber" content="0"/>
               </head>
@@ -341,8 +416,29 @@ class EpubGenerator {
         )
     }
 
-    private fun chapterXhtml(title: String, body: String, language: String): String =
-        xhtmlDocument(title, language, """<main>$body</main>""")
+    private fun tocRoots(chapters: List<DetectedChapter>): List<TocItem> {
+        val roots = mutableListOf<TocItem>()
+        chapters.forEachIndexed { index, chapter ->
+            val item = TocItem(
+                title = chapter.title,
+                href = "chapter_${index + 1}.xhtml#${chapter.anchorId}",
+            )
+            if (chapter.tocLevel == 1 || roots.isEmpty()) {
+                roots += item
+            } else {
+                roots.last().children += item
+            }
+        }
+        return roots
+    }
+
+    private fun chapterXhtml(
+        title: String,
+        body: String,
+        language: String,
+        anchorId: String,
+    ): String =
+        xhtmlDocument(title, language, """<main id="${xml(anchorId)}">$body</main>""")
 
     private fun coverXhtml(title: String, extension: String): String =
         xhtmlDocument(
@@ -418,6 +514,8 @@ class EpubGenerator {
           padding: 0;
         }
         .cover img { max-height: 95%; }
+        #visible-toc ol { padding-left: 1.35em; }
+        #visible-toc li { margin: 0.45em 0; }
     """.trimIndent()
 
     private fun writeMimetype(zip: ZipOutputStream) {
@@ -444,11 +542,6 @@ class EpubGenerator {
         zip.write(bytes)
         zip.closeEntry()
     }
-
-    private fun plainHeading(value: String): String = value
-        .replace(Regex("""\[(.+?)]\(.+?\)"""), "$1")
-        .replace(Regex("""[*_`~]"""), "")
-        .trim()
 
     private fun String.isRemoteImage(): Boolean =
         startsWith("http://", ignoreCase = true) ||
@@ -524,8 +617,16 @@ class EpubGenerator {
     private fun xmlDocument(content: String): String =
         """<?xml version="1.0" encoding="UTF-8"?>""" + "\n" + content
 
-    private data class Chapter(val title: String, val markdown: String)
-    private data class ParsedChapter(val title: String, val document: Node)
+    private data class ParsedChapter(
+        val detected: DetectedChapter,
+        val document: Node,
+    )
+
+    private data class TocItem(
+        val title: String,
+        val href: String,
+        val children: MutableList<TocItem> = mutableListOf(),
+    )
 
     private data class ImageBinding(
         val asset: EpubAsset,
@@ -535,7 +636,6 @@ class EpubGenerator {
     companion object {
         const val EPUB_MIMETYPE = "application/epub+zip"
         private const val ZIP_TIME = 315_532_800_000L
-        private val H1_PATTERN = Regex("""^#\s+(.+?)\s*#*\s*$""")
         private val SUPPORTED_IMAGE_TYPES = setOf("image/jpeg", "image/jpg", "image/png", "image/gif")
     }
 }

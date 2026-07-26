@@ -182,6 +182,7 @@ private fun ConverterScreen(
 
             if (state.sourceName.isNotBlank()) {
                 SourceCard(state)
+                IndexPreviewCard(state)
 
                 OutlinedTextField(
                     value = state.title,
@@ -320,7 +321,7 @@ private fun IntroCard() {
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "La conversión se hace en el móvil. Los títulos de nivel 1 crean capítulos e índice.",
+                "La conversión se hace en el móvil. La v2 reconoce H1, H2, H3 y títulos de capítulo escritos sin #.",
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
@@ -345,6 +346,46 @@ private fun SourceCard(state: ConverterUiState) {
                 "${state.markdown.length} caracteres",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun IndexPreviewCard(state: ConverterUiState) {
+    Surface(
+        tonalElevation = 1.dp,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Text(
+                "Índice detectado · ${state.tableOfContents.size} entradas",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            state.tableOfContents.take(30).forEach { entry ->
+                Text(
+                    text = if (entry.level == 1) entry.title else "↳ ${entry.title}",
+                    modifier = Modifier.padding(start = if (entry.level == 1) 0.dp else 14.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (state.tableOfContents.size > 30) {
+                Text(
+                    "…y ${state.tableOfContents.size - 30} entradas más",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                "Este mismo índice se incluirá como página visible y en «Ir a / Índice» de Kindle.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
             )
         }
     }

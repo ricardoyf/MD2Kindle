@@ -12,6 +12,7 @@ import com.ricardo.md2kindle.epub.EpubAsset
 import com.ricardo.md2kindle.epub.EpubBook
 import com.ricardo.md2kindle.epub.EpubGenerator
 import com.ricardo.md2kindle.epub.EpubMetadata
+import com.ricardo.md2kindle.epub.TocPreviewEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +29,7 @@ data class ConverterUiState(
     val title: String = "",
     val author: String = "",
     val language: String = "es",
+    val tableOfContents: List<TocPreviewEntry> = emptyList(),
     val images: List<EpubAsset> = emptyList(),
     val cover: EpubAsset? = null,
     val isBusy: Boolean = false,
@@ -71,16 +73,18 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                 require(text.isNotBlank()) { "El documento está vacío." }
                 val suggestedTitle = firstHeading(text)
                     ?: name.substringBeforeLast('.').ifBlank { "Libro" }
+                val tableOfContents = generator.detectTableOfContents(text, suggestedTitle)
                 _uiState.value = _uiState.value.copy(
                     sourceName = name,
                     markdown = text,
                     title = suggestedTitle,
+                    tableOfContents = tableOfContents,
                     images = emptyList(),
                     cover = null,
                     generatedFile = null,
                     warnings = emptyList(),
                     isBusy = false,
-                    status = "Documento cargado. Revisa los datos y pulsa Crear EPUB.",
+                    status = "Documento cargado: ${tableOfContents.size} entradas de índice detectadas.",
                 )
             }.onFailure(::showError)
         }
@@ -88,15 +92,18 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun loadSharedText(text: String) {
         if (text.isBlank()) return
+        val title = firstHeading(text) ?: "Libro"
+        val tableOfContents = generator.detectTableOfContents(text, title)
         _uiState.value = _uiState.value.copy(
             sourceName = "texto_compartido.md",
             markdown = text,
-            title = firstHeading(text) ?: "Libro",
+            title = title,
+            tableOfContents = tableOfContents,
             images = emptyList(),
             cover = null,
             generatedFile = null,
             warnings = emptyList(),
-            status = "Texto compartido cargado. Revisa los datos y pulsa Crear EPUB.",
+            status = "Texto compartido cargado: ${tableOfContents.size} entradas de índice detectadas.",
         )
     }
 
@@ -182,7 +189,12 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun updateTitle(value: String) {
-        _uiState.value = _uiState.value.copy(title = value, generatedFile = null)
+        val state = _uiState.value
+        _uiState.value = state.copy(
+            title = value,
+            tableOfContents = generator.detectTableOfContents(state.markdown, value),
+            generatedFile = null,
+        )
     }
 
     fun updateAuthor(value: String) {

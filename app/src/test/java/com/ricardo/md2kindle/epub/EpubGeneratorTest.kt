@@ -58,23 +58,25 @@ class EpubGeneratorTest {
                 metadata = metadata,
             ),
         ) { file, result ->
-            assertEquals(3, result.chapterCount)
+            assertEquals(2, result.chapterCount)
             ZipFile(file).use { zip ->
                 val names = zip.entries().asSequence().map { it.name }.toSet()
                 assertTrue("META-INF/container.xml" in names)
                 assertTrue("EPUB/package.opf" in names)
                 assertTrue("EPUB/nav.xhtml" in names)
                 assertTrue("EPUB/toc.ncx" in names)
+                assertTrue("EPUB/contents.xhtml" in names)
+                assertTrue(names.toString(), "EPUB/frontmatter.xhtml" in names)
                 assertTrue("EPUB/chapter_1.xhtml" in names)
-                assertTrue("EPUB/chapter_3.xhtml" in names)
+                assertTrue("EPUB/chapter_2.xhtml" in names)
 
                 val opf = zip.readText("EPUB/package.opf")
                 assertTrue(opf.contains("Prueba &amp; lectura"))
                 assertTrue(opf.contains("Ricardo &lt;Autor&gt;"))
 
-                val third = zip.readText("EPUB/chapter_3.xhtml")
-                assertTrue(third.contains("<table>"))
-                assertTrue(third.contains("<td>1</td>"))
+                val second = zip.readText("EPUB/chapter_2.xhtml")
+                assertTrue(second.contains("<table>"))
+                assertTrue(second.contains("<td>1</td>"))
             }
         }
 
@@ -186,6 +188,46 @@ class EpubGeneratorTest {
     }
 
     @Test
+    fun `genera indice visible y navegacion jerarquica con enlaces internos validos`() =
+        withGeneratedEpub(
+            EpubBook(
+                markdown = """
+                    # Libro
+
+                    ## Mapa de escucha
+
+                    - [Capítulo](#1-capítulo-ámbito)
+
+                    ## Primera parte
+
+                    Véase [el capítulo](#1-capítulo-ámbito).
+
+                    ### 1. Capítulo ámbito
+
+                    Texto.
+
+                    ## Epílogo
+                """.trimIndent(),
+                metadata = metadata,
+            ),
+        ) { file, result ->
+            assertEquals(3, result.chapterCount)
+            ZipFile(file).use { zip ->
+                val contents = zip.readText("EPUB/contents.xhtml")
+                val nav = zip.readText("EPUB/nav.xhtml")
+                val ncx = zip.readText("EPUB/toc.ncx")
+                val first = zip.readText("EPUB/chapter_1.xhtml")
+                val second = zip.readText("EPUB/chapter_2.xhtml")
+                assertTrue(contents.contains("""href="chapter_2.xhtml#1-capitulo-ambito""""))
+                assertTrue(nav.contains("<ol>"))
+                assertTrue(ncx.contains("""content="2""""))
+                assertTrue(first.contains("""href="chapter_2.xhtml#1-capitulo-ambito""""))
+                assertTrue(second.contains("""id="1-capitulo-ambito""""))
+                assertFalse(contents.contains("Mapa de escucha"))
+            }
+        }
+
+    @Test
     fun `todos los xml y xhtml generados son parseables`() = withGeneratedEpub(
         EpubBook(
             markdown = """
@@ -275,11 +317,33 @@ class EpubGeneratorTest {
                 ),
                 output,
             )
-            assertEquals(3, result.chapterCount)
+            assertEquals(2, result.chapterCount)
             assertEquals(4, result.embeddedImageCount)
         }
         assertTrue(target.isFile)
         assertTrue(target.length() > 1_000)
+    }
+
+    @Test
+    fun `genera epub del documento real cuando se facilita por entorno`() {
+        val path = System.getenv("MD2KINDLE_REAL_MD") ?: return
+        val source = File(path)
+        assertTrue(source.isFile)
+        val validationDir = File("build/validation").apply { mkdirs() }
+        val target = File(validationDir, "LA_CIUDAD_Y_EL_LABERINTO-v2.epub")
+
+        FileOutputStream(target).use { output ->
+            val result = generator.write(
+                EpubBook(
+                    markdown = source.readText(),
+                    metadata = metadata.copy(title = "LA CIUDAD Y EL LABERINTO"),
+                ),
+                output,
+            )
+            assertEquals(25, result.chapterCount)
+            assertTrue(result.warnings.isEmpty())
+        }
+        assertTrue(target.length() > 10_000)
     }
 
     private fun withGeneratedEpub(
