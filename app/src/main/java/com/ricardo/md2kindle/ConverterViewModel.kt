@@ -48,24 +48,56 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
         if (intent == null) return
         when (intent.action) {
             Intent.ACTION_SEND -> {
-                val uri = intent.parcelableStream()
+                val uri = intent.streamUri()
                 when {
-                    uri != null -> loadSource(uri)
-                    intent.getStringExtra(Intent.EXTRA_TEXT)?.isNotBlank() == true ->
+                    uri != null -> loadIncomingSource(
+                        uri = uri,
+                        action = intent.action,
+                        mimeType = intent.type,
+                    )
+                    DocumentAdmission.acceptsSharedText(intent.action, intent.type) &&
+                        intent.getStringExtra(Intent.EXTRA_TEXT)?.isNotBlank() == true ->
                         loadSharedText(intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty())
                 }
             }
 
-            Intent.ACTION_VIEW -> intent.data?.let(::loadSource)
+            Intent.ACTION_VIEW -> intent.data?.let { uri ->
+                loadIncomingSource(
+                    uri = uri,
+                    action = intent.action,
+                    mimeType = intent.type,
+                )
+            }
         }
     }
 
     fun loadSource(uri: Uri) {
+        loadSource(uri, incomingIntent = null)
+    }
+
+    private fun loadIncomingSource(uri: Uri, action: String?, mimeType: String?) {
+        loadSource(uri, IncomingIntent(action, mimeType))
+    }
+
+    private fun loadSource(uri: Uri, incomingIntent: IncomingIntent?) {
         viewModelScope.launch {
             setBusy("Leyendo documento…")
             runCatching {
                 persistPermission(uri)
-                val name = displayName(uri) ?: "documento.md"
+                val resolvedName = displayName(uri)
+                if (incomingIntent != null) {
+                    require(
+                        DocumentAdmission.acceptsUri(
+                            action = incomingIntent.action,
+                            mimeType = incomingIntent.mimeType,
+                            scheme = uri.scheme,
+                            displayName = resolvedName,
+                        ),
+                    ) {
+                        "El archivo recibido no es Markdown ni texto compatible."
+                    }
+                }
+                val name = resolvedName ?: "documento.md"
                 val bytes = readLimited(uri, MAX_SOURCE_BYTES)
                 val text = bytes.toString(Charsets.UTF_8)
                     .removePrefix("\uFEFF")
@@ -303,19 +335,28 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             } ?: error("No se pudo leer el archivo.")
         }
 
-    private fun displayName(uri: Uri): String? {
-        var cursor: Cursor? = null
-        return try {
-            cursor = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            if (cursor?.moveToFirst() == true) {
-                cursor.getString(0)
-            } else {
-                uri.lastPathSegment?.substringAfterLast('/')
+    private fun displayName(uri: Uri): String? =
+        runCatching {
+            var cursor: Cursor? = null
+            try {
+                cursor = resolver.query(
+                    uri,
+                    arrayOf(OpenableColumns.DISPLAY_NAME),
+                    null,
+                    null,
+                    null,
+                )
+                if (cursor?.moveToFirst() == true) {
+                    cursor.getString(0)
+                } else {
+                    null
+                }
+            } finally {
+                cursor?.close()
             }
-        } finally {
-            cursor?.close()
-        }
-    }
+        }.getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment?.substringAfterLast('/')
 
     private fun persistPermission(uri: Uri) {
         runCatching {
@@ -392,8 +433,14 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
             .lowercase()
 
     @Suppress("DEPRECATION")
-    private fun Intent.parcelableStream(): Uri? =
-        getParcelableExtra(Intent.EXTRA_STREAM)
+    private fun Intent.streamUri(): Uri? =
+        getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            ?: clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+
+    private data class IncomingIntent(
+        val action: String?,
+        val mimeType: String?,
+    )
 
     companion object {
         private const val MAX_SOURCE_BYTES = 25 * 1024 * 1024

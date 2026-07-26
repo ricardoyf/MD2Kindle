@@ -19,8 +19,8 @@ android {
         applicationId = "com.ricardo.md2kindle"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "v2"
+        versionCode = 3
+        versionName = "v3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

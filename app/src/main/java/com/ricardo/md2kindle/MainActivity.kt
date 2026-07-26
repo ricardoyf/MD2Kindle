@@ -43,11 +43,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -59,18 +56,12 @@ import java.io.File
 
 class MainActivity : ComponentActivity() {
     private val converterViewModel: ConverterViewModel by viewModels()
-    private var pendingIntent by mutableStateOf<Intent?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        pendingIntent = intent
+        converterViewModel.consumeIntent(intent)
         setContent {
             MD2KindleTheme {
-                val received = pendingIntent
-                LaunchedEffect(received) {
-                    converterViewModel.consumeIntent(received)
-                    pendingIntent = null
-                }
                 ConverterScreen(
                     viewModel = converterViewModel,
                     onShare = ::shareEpub,
@@ -82,7 +73,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        pendingIntent = intent
+        converterViewModel.consumeIntent(intent)
     }
 
     private fun shareEpub(file: File) {
@@ -321,7 +312,7 @@ private fun IntroCard() {
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "La conversión se hace en el móvil. La v2 reconoce H1, H2, H3 y títulos de capítulo escritos sin #.",
+                "La conversión se hace en el móvil. La v3 también puede abrir Markdown directamente desde «Abrir con».",
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
