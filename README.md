@@ -1,5 +1,5 @@
 <!-- app-release:start -->
-[**Descargar APK v3**](https://github.com/ricardoyf/MD2Kindle/releases/download/v3/MD2Kindle-v3.apk) · [SHA-256](https://github.com/ricardoyf/MD2Kindle/releases/download/v3/MD2Kindle-v3.apk.sha256)
+[**Descargar APK v3**](https://github.com/ricardoyf/MD2Kindle/raw/refs/tags/v3/MD2Kindle-v3.apk) · [SHA-256](https://github.com/ricardoyf/MD2Kindle/raw/refs/tags/v3/MD2Kindle-v3.apk.sha256)
 
 `7cf14b144529745e6772f2da1b187460426105788283a783087a9a3ebc2df3f2`
 <!-- app-release:end -->
